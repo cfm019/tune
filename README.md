@@ -19,11 +19,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cfm019/tune/main/tune.sh)
 ```bash
 # 语法：bash <(curl -fsSL ...) [RTT(ms)] [Bandwidth(Mbps)]
 
-# 示例：香港/亚太节点 (45ms RTT, 100Mbps)
-bash <(curl -fsSL https://raw.githubusercontent.com/cfm019/tune/main/tune.sh) 45 100
+# 示例：香港/亚太节点 (45ms RTT, 1000Mbps)
+bash <(curl -fsSL https://raw.githubusercontent.com/cfm019/tune/main/tune.sh) 45 1000
 
-# 示例：美西节点 (150ms RTT, 100Mbps)
-bash <(curl -fsSL https://raw.githubusercontent.com/cfm019/tune/main/tune.sh) 150 100
+# 示例：美西节点 (150ms RTT, 1000Mbps)
+bash <(curl -fsSL https://raw.githubusercontent.com/cfm019/tune/main/tune.sh) 150 1000
 ```
 
 ---
@@ -93,7 +93,7 @@ $$\text{初始接收缓冲} = 2.5 \times \text{BDP}$$
 sudo bash tune.sh
 
 # 非交互式
-sudo bash tune.sh 45 100
+sudo bash tune.sh 45 1000
 ```
 
 ---
@@ -101,10 +101,10 @@ sudo bash tune.sh 45 100
 ### 3. 远程执行（通过 SSH / bwssh）
 ```bash
 # 通过标准 SSH
-ssh root@<VPS_IP> "bash -s" < tune.sh 45 100
+ssh root@<VPS_IP> "bash -s" < tune.sh 45 1000
 
 # 通过 bwssh
-~/.local/bin/bwssh <host-alias> "bash -s" < tune.sh 150 100
+~/.local/bin/bwssh <host-alias> "bash -s" < tune.sh 150 1000
 ```
 
 ---
