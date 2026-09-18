@@ -39,7 +39,15 @@ if [[ -z "$INPUT_RTT" ]]; then
     DEFAULT_RTT="${DETECTED_RTT:-50}"
     echo ""
     echo "常见延迟参考: 香港(45ms) | 日韩(70ms) | 美西(150ms) | 欧洲(200ms)"
-    read -r -p "请输入到客户端的往返延迟 RTT (ms) [默认: ${DEFAULT_RTT}]: " USER_RTT < /dev/tty 2>/dev/null || USER_RTT=""
+    printf "请输入到客户端的往返延迟 RTT (ms) [默认: %s]: " "${DEFAULT_RTT}"
+    if [[ -t 0 ]]; then
+        read -r USER_RTT
+    elif [[ -r /dev/tty ]]; then
+        read -r USER_RTT < /dev/tty || USER_RTT=""
+    else
+        echo ""
+        USER_RTT=""
+    fi
     RTT="${USER_RTT:-$DEFAULT_RTT}"
 else
     RTT="$INPUT_RTT"
@@ -47,7 +55,15 @@ fi
 
 if [[ -z "$INPUT_BW" ]]; then
     DEFAULT_BW="100"
-    read -r -p "请输入期望保障的客户端上传带宽 (Mbps) [默认: 100]: " USER_BW < /dev/tty 2>/dev/null || USER_BW=""
+    printf "请输入期望保障的客户端上传带宽 (Mbps) [默认: %s]: " "${DEFAULT_BW}"
+    if [[ -t 0 ]]; then
+        read -r USER_BW
+    elif [[ -r /dev/tty ]]; then
+        read -r USER_BW < /dev/tty || USER_BW=""
+    else
+        echo ""
+        USER_BW=""
+    fi
     BANDWIDTH_MBPS="${USER_BW:-$DEFAULT_BW}"
 else
     BANDWIDTH_MBPS="$INPUT_BW"
