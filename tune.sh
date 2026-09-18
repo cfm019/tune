@@ -27,11 +27,11 @@ if [[ -n "$CLIENT_IP" ]]; then
         DETECTED_RTT=$(printf "%.0f" "${BASH_REMATCH[1]}")
         echo "探测成功: ${DETECTED_RTT} ms"
     else
-        echo "客户端禁止 ICMP 回显，采用预设基准"
+        echo "客户端禁止 ICMP 回显，采用默认基准"
     fi
 fi
 
-# 2. 参数输入与交互处理 (支持命令行参数: ./tune.sh [RTT] [BANDWIDTH_MBPS])
+# 2. 参数交互处理 (支持命令行直接传参: ./tune.sh [RTT] [BANDWIDTH_MBPS])
 INPUT_RTT="${1:-}"
 INPUT_BW="${2:-}"
 
@@ -54,7 +54,7 @@ else
 fi
 
 if [[ -z "$INPUT_BW" ]]; then
-    DEFAULT_BW="100"
+    DEFAULT_BW="1000"
     printf "请输入期望保障的客户端上传带宽 (Mbps) [默认: %s]: " "${DEFAULT_BW}"
     if [[ -t 0 ]]; then
         read -r USER_BW
@@ -84,32 +84,35 @@ echo "===> [1/4] 计算 BDP 与网络协议栈参数..."
 # BDP 字节数 = 带宽(Mbps) * 10^6 / 8 * RTT(ms) / 1000 = 带宽 * RTT * 125
 BDP_BYTES=$(( BANDWIDTH_MBPS * RTT * 125 ))
 
-# 初始接收缓冲 (考量 adv_win_scale=1 的 50% 开销 + 25% 裕量 => 2.5 * BDP)
+# 初始接收缓冲推导 (考量 50% 协议头开销 + 25% 裕量 => 2.5 * BDP)
 CALC_DEFAULT_BUF=$(( BDP_BYTES * 5 / 2 ))
-# 最小保底 2MB (2097152)，且向上按 512KB 对齐
 MIN_BUF=2097152
+
 if (( CALC_DEFAULT_BUF < MIN_BUF )); then
     RMEM_DEFAULT=$MIN_BUF
 else
     RMEM_DEFAULT=$(( ((CALC_DEFAULT_BUF + 524287) / 524288) * 524288 ))
 fi
 
-# 读取机器物理内存，防止低配 VPS OOM
+# 读取机器物理内存，防止低配 VPS 发生 OOM
 TOTAL_MEM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo 1024)
 if (( TOTAL_MEM_MB <= 1024 )); then
-    # 1GB 及以下小内存 VPS: 最大缓冲限制在 16MB
-    RMEM_MAX=16777216
+    MAX_ALLOWED_DEFAULT=8388608    # 1GB 内存机默认初始缓冲上限 8MB
+    RMEM_MAX=33554432             # 最大缓冲上限 32MB
 elif (( TOTAL_MEM_MB <= 2048 )); then
-    # 2GB 内存 VPS: 最大缓冲 32MB
+    MAX_ALLOWED_DEFAULT=16777216   # 2GB 内存机默认初始缓冲上限 16MB
     RMEM_MAX=33554432
 else
-    # 4GB+ 内存 VPS: 最大缓冲根据延迟自适应 32MB ~ 64MB
+    MAX_ALLOWED_DEFAULT=33554432   # 4GB+ 内存机默认初始缓冲上限 32MB
     if (( RTT >= 150 )); then
-        RMEM_MAX=67108864
+        RMEM_MAX=67108864         # 高延迟大内存节点最大缓冲 64MB
     else
         RMEM_MAX=33554432
     fi
 fi
+
+# 结合内存安全收敛初始缓冲与最大缓冲
+(( RMEM_DEFAULT > MAX_ALLOWED_DEFAULT )) && RMEM_DEFAULT=$MAX_ALLOWED_DEFAULT
 (( RMEM_MAX < RMEM_DEFAULT * 2 )) && RMEM_MAX=$(( RMEM_DEFAULT * 2 ))
 
 # 根据 RTT 阶梯计算 notsent_lowat (消灭 Bufferbloat) 与 limit_output_bytes
@@ -134,7 +137,7 @@ echo "----------------------------------------------------------"
 echo "物理延迟 RTT           : ${RTT} ms"
 echo "目标保障带宽           : ${BANDWIDTH_MBPS} Mbps"
 echo "计算物理 BDP           : $(( BDP_BYTES / 1024 )) KB"
-echo "初始接收缓冲 (rmem)    : $(( RMEM_DEFAULT / 1024 / 1024 )) MB ($RMEM_DEFAULT bytes)"
+echo "初始接收缓冲 (rmem)    : $(( RMEM_DEFAULT / 1024 / 1024 )) MB ($RMEM_DEFAULT 字节)"
 echo "初始通告窗口 (rcv_wnd) : 约 ${APPROX_INIT_WND_MB} MB"
 echo "起步吞吐物理上限       : 约 ${THEORY_MAX_MBPS} Mbps (无需等待扩窗)"
 echo "最大缓冲上限 (max)     : $(( RMEM_MAX / 1024 / 1024 )) MB (已适配宿主机内存 ${TOTAL_MEM_MB}MB)"
@@ -142,12 +145,23 @@ echo "未发队列限制 (lowat)   : $(( NOTSENT_LOWAT / 1024 )) KB (防止 Buff
 echo "排队单次限制 (output)  : $(( LIMIT_OUTPUT / 1024 )) KB"
 echo "----------------------------------------------------------"
 
-echo "===> [2/4] 备份原有 sysctl 配置..."
+echo "===> [2/4] 备份原有配置并清理冲突文件..."
 CONF_FILE="/etc/sysctl.d/99-bbr-proxy.conf"
 [[ -f "$CONF_FILE" ]] && cp "$CONF_FILE" "${CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)"
 
+# 自动处理可能引起冲突或因参数失效导致报错的历史第三方调优文件
+for old_conf in /etc/sysctl.d/99-tcpfit.conf /etc/sysctl.d/99-bbr.conf; do
+    if [[ -f "$old_conf" && "$old_conf" != "$CONF_FILE" ]]; then
+        echo "备份并禁用冲突配置: $old_conf"
+        mv "$old_conf" "${old_conf}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    fi
+done
+
+# 预先加载 nf_conntrack 内核模块
+modprobe nf_conntrack 2>/dev/null || true
+
 echo "===> [3/4] 写入动态调优内核配置..."
-cat <<EOF > "$CONF_FILE"
+cat <<CONF_EOF > "$CONF_FILE"
 # ══════════════════════════════════════════════════════════════
 # TCP/IP & BBR 自适应动态调优配置
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
@@ -201,10 +215,12 @@ net.ipv4.tcp_mtu_probing = 0
 fs.file-max = 1048576
 vm.swappiness = 10
 net.ipv4.tcp_fastopen = 3
-net.netfilter.nf_conntrack_max = 524288
-EOF
+-net.netfilter.nf_conntrack_max = 524288
+CONF_EOF
 
-sysctl --system >/dev/null
+# 优先精准加载目标文件，避免被其他系统残留错误配置阻断
+sysctl -e -p "$CONF_FILE" >/dev/null 2>&1 || sysctl -p "$CONF_FILE" >/dev/null 2>&1 || true
+sysctl --system >/dev/null 2>&1 || true
 
 echo "===> [4/4] 重启代理服务让 Listening Socket 继承新缓冲区..."
 SERVICES=("vless-singbox" "sing-box" "xray" "vless-xray" "hysteria-server" "trojan-go")
