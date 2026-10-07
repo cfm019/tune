@@ -15,7 +15,54 @@ echo "=========================================================="
 echo "    🚀 VPS 网络自适应调优向导"
 echo "=========================================================="
 
-# 1. 自动探测客户端 RTT
+# 1. 检测并确保启用 BBR
+echo -n "正在检测系统 BBR 支持状态... "
+CURRENT_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+[[ -z "$CURRENT_CC" ]] && CURRENT_CC=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || true)
+
+if [[ "$CURRENT_CC" == "bbr" ]]; then
+    echo "已启用 (当前算法: bbr)"
+    if [[ -d /etc/modules-load.d && ! -f /etc/modules-load.d/bbr.conf ]]; then
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+    fi
+else
+    echo "未启用 (当前算法: ${CURRENT_CC:-未知})"
+    echo -n "===> 正在尝试开启 BBR... "
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe sch_fq 2>/dev/null || true
+
+    AVAIL_CC=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)
+    [[ -z "$AVAIL_CC" ]] && AVAIL_CC=$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || true)
+
+    if [[ " $AVAIL_CC " =~ [[:space:]]bbr[[:space:]] ]]; then
+        # 尝试即时应用并配置开机自启
+        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+
+        if [[ -d /etc/modules-load.d ]]; then
+            echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+            echo "sch_fq" >> /etc/modules-load.d/bbr.conf 2>/dev/null || true
+        elif [[ -f /etc/modules ]] && ! grep -q "^tcp_bbr" /etc/modules 2>/dev/null; then
+            echo "tcp_bbr" >> /etc/modules 2>/dev/null || true
+            echo "sch_fq" >> /etc/modules 2>/dev/null || true
+        fi
+
+        TEST_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+        if [[ "$TEST_CC" == "bbr" ]]; then
+            echo "成功启用 BBR！"
+        else
+            echo "已加载 BBR 模块 (将在后续写入内核配置时完全生效)"
+        fi
+    else
+        echo "失败"
+        echo "错误: 当前系统内核不支持 BBR (可用算法: ${AVAIL_CC:-无})！" >&2
+        echo "当前内核版本: $(uname -r)" >&2
+        echo "提示: BBR 需要 Linux 4.9+ 内核。若为 OpenVZ/LXC 容器架构，需宿主机开启支持。" >&2
+        exit 1
+    fi
+fi
+
+# 2. 自动探测客户端 RTT
 CLIENT_IP=$(echo "${SSH_CLIENT:-}" | awk '{print $1}')
 [[ -z "$CLIENT_IP" ]] && CLIENT_IP=$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')
 
@@ -31,7 +78,7 @@ if [[ -n "$CLIENT_IP" ]]; then
     fi
 fi
 
-# 2. 参数交互处理 (支持命令行直接传参: ./tune.sh [RTT] [BANDWIDTH_MBPS])
+# 3. 参数交互处理 (支持命令行直接传参: ./tune.sh [RTT] [BANDWIDTH_MBPS])
 INPUT_RTT="${1:-}"
 INPUT_BW="${2:-}"
 
@@ -157,8 +204,10 @@ for old_conf in /etc/sysctl.d/99-tcpfit.conf /etc/sysctl.d/99-bbr.conf; do
     fi
 done
 
-# 预先加载 nf_conntrack 内核模块
+# 预先加载必要内核模块
 modprobe nf_conntrack 2>/dev/null || true
+modprobe tcp_bbr 2>/dev/null || true
+modprobe sch_fq 2>/dev/null || true
 
 echo "===> [3/4] 写入动态调优内核配置..."
 cat <<CONF_EOF > "$CONF_FILE"
